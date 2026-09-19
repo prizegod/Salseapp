@@ -97,8 +97,7 @@ namespace ShopSaleAPI.Controllers
             }
 
             var httpClient = _httpClientFactory.CreateClient();
-            // Option B: Gemini 2.0 Flash
-            string requestUrl = $"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={apiKey}";
+            string requestUrl = $"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={apiKey}";
             var requestBody = new
             {
                 contents = new[]
