@@ -13,16 +13,19 @@ builder.Services.AddControllers()
     options.JsonSerializerOptions.DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull;
 });
 
+// HttpClient Service Registration (DocScannerController-க்குத் தேவைப்படுகிறது)
+builder.Services.AddHttpClient();
+
 // 2. Configure CORS policy to ALLOW ALL ORIGINS
 var corsPolicyName = "AllowMobileAndWeb";
 builder.Services.AddCors(options =>
 {
     options.AddPolicy(name: corsPolicyName, policy =>
     {
-        policy.SetIsOriginAllowed(_ => true) // 👈 Mobile/Capacitor origins-க்கு சிறந்தது
+        policy.SetIsOriginAllowed(_ => true) // Mobile/Capacitor origins-க்கு சிறந்தது
         .AllowAnyHeader()
         .AllowAnyMethod()
-        .AllowCredentials(); // Optional: headers அனுமதிக்க
+        .AllowCredentials();
     });
 });
 
@@ -66,7 +69,6 @@ using (var scope = app.Services.CreateScope())
 }
 
 // 6. Configure the HTTP request pipeline (Always Enable Swagger)
-// 👈 if (app.Environment.IsDevelopment()) நீக்கப்பட்டு விட்டது
 app.UseSwagger();
 app.UseSwaggerUI(c =>
 {
@@ -74,13 +76,13 @@ app.UseSwaggerUI(c =>
     c.RoutePrefix = "swagger"; // http://localhost:5000/swagger
 });
 
-// 1. முதலில் Routing
+// 1. Routing
 app.UseRouting();
 
-// 2. இரண்டாவதாக CORS (Routing-க்கு பின் கட்டாயம் இருக்க வேண்டும்)
+// 2. CORS (Routing-க்கு பின் கட்டாயம் இருக்க வேண்டும்)
 app.UseCors(corsPolicyName);
 
-// 3. மூன்றாவதாக Authorization & Controllers
+// 3. Authorization & Controllers
 app.UseAuthorization();
 
 app.MapControllers();

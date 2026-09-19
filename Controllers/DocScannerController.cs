@@ -5,7 +5,6 @@ using System.Linq;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
-using System.Text.Json.Serialization;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
@@ -21,11 +20,16 @@ namespace ShopSaleAPI.Controllers
     {
         private readonly ILogger<DocScannerController> _logger;
         private readonly IConfiguration _configuration;
+        private readonly IHttpClientFactory _httpClientFactory;
 
-        public DocScannerController(ILogger<DocScannerController> logger, IConfiguration configuration)
+        public DocScannerController(
+            ILogger<DocScannerController> logger,
+            IConfiguration configuration,
+            IHttpClientFactory httpClientFactory)
         {
             _logger = logger;
             _configuration = configuration;
+            _httpClientFactory = httpClientFactory;
         }
 
         /// <summary>
@@ -54,13 +58,11 @@ namespace ShopSaleAPI.Controllers
             {
                 _logger.LogInformation("Processing receipt document via Gemini AI: {FileName}, size: {Size} bytes", file.FileName, file.Length);
 
-                // Read file stream and convert to Base64
                 using var memoryStream = new MemoryStream();
                 await file.CopyToAsync(memoryStream);
                 var fileBytes = memoryStream.ToArray();
                 string base64Data = Convert.ToBase64String(fileBytes);
 
-                // Get MimeType
                 string mimeType = file.ContentType;
                 if (string.IsNullOrEmpty(mimeType) || mimeType == "application/octet-stream")
                 {
@@ -74,7 +76,6 @@ namespace ShopSaleAPI.Controllers
                     };
                 }
 
-                // Call Gemini API
                 var result = await ProcessWithGeminiAsync(base64Data, mimeType);
 
                 return Ok(result);
@@ -88,7 +89,6 @@ namespace ShopSaleAPI.Controllers
 
         private async Task<DocScanResult> ProcessWithGeminiAsync(string base64Data, string mimeType)
         {
-            // Get Gemini API Key from appsettings.json or Render Environment Variables
             string apiKey = _configuration["GEMINI_API_KEY"] ?? _configuration["GeminiApiKey"];
 
             if (string.IsNullOrEmpty(apiKey))
@@ -96,8 +96,8 @@ namespace ShopSaleAPI.Controllers
                 throw new Exception("Gemini API Key is not configured in Environment Variables (GEMINI_API_KEY).");
             }
 
-            using var httpClient = new HttpClient();
-            string requestUrl = $"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={apiKey}";
+            var httpClient = _httpClientFactory.CreateClient();
+            string requestUrl = $"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={apiKey}";
 
             var requestBody = new
             {
@@ -168,7 +168,7 @@ namespace ShopSaleAPI.Controllers
             .GetProperty("content")
             .GetProperty("parts")[0]
             .GetProperty("text")
-            .GetString();
+            .GetString() ?? "{}";
 
             var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
             var extractedData = JsonSerializer.Deserialize<GeminiExtractedResponse>(geminiOutputText, options);
@@ -189,13 +189,12 @@ namespace ShopSaleAPI.Controllers
                                                      UnitPrice = i.UnitPrice > 0 ? i.UnitPrice : i.LineTotal,
                                                      LineTotal = i.LineTotal
                 }).ToList() ?? new List<DocScanItem>(),
-                RawText = extractedData?.RawText ?? "Processed via Gemini 2.5 Flash",
+                RawText = !string.IsNullOrEmpty(extractedData?.RawText) ? extractedData.RawText : "Processed via Gemini 1.5 Flash",
                 ConfidenceScore = 0.98,
                 ProcessedAt = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
             };
         }
 
-        // Helper class for Gemini JSON Response
         private class GeminiExtractedResponse
         {
             public string? MerchantName { get; set; }
