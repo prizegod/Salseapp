@@ -8,8 +8,10 @@ using System.Text.Json;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
+using ShopSaleAPI.Data; // உங்கள் DbContext Path-ஐ சரிபார்க்கவும்
 using ShopSaleAPI.Models;
 
 namespace ShopSaleAPI.Controllers
@@ -21,19 +23,23 @@ namespace ShopSaleAPI.Controllers
         private readonly ILogger<DocScannerController> _logger;
         private readonly IConfiguration _configuration;
         private readonly IHttpClientFactory _httpClientFactory;
+        private readonly ShopSaleDbContext _dbContext; // DbContext சேர்க்கப்பட்டது
 
         public DocScannerController(
             ILogger<DocScannerController> logger,
-            IConfiguration configuration,
-            IHttpClientFactory httpClientFactory)
+            IConfiguration _configuration,
+            IHttpClientFactory httpClientFactory,
+            ShopSaleDbContext dbContext)
         {
             _logger = logger;
-            _configuration = configuration;
+            this._configuration = _configuration;
             _httpClientFactory = httpClientFactory;
+            _dbContext = dbContext;
         }
 
         /// <summary>
-        /// Scans an uploaded receipt image or PDF and extracts structured fields using Gemini AI
+        /// Scans an uploaded receipt image or PDF, extracts structured fields using Gemini AI,
+        /// and automatically saves non-existing products & sales entries into the Database.
         /// </summary>
         [HttpPost("scan")]
         [Consumes("multipart/form-data")]
@@ -76,7 +82,11 @@ namespace ShopSaleAPI.Controllers
                     };
                 }
 
+                // 1. Gemini AI மூலம் ஸ்கேன் செய்த தரவைப் பெறுதல்
                 var result = await ProcessWithGeminiAsync(base64Data, mimeType);
+
+                // 2. பெறப்பட்ட தரவை ஆட்டோமேட்டிக்காக டேட்டாபேஸில் சேமித்தல்
+                await SaveScannedDataToDatabaseAsync(result);
 
                 return Ok(result);
             }
@@ -84,6 +94,79 @@ namespace ShopSaleAPI.Controllers
             {
                 _logger.LogError(ex, "Error occurred while scanning document {FileName}", file.FileName);
                 return StatusCode(500, new { message = "An error occurred while processing document with Gemini AI.", error = ex.Message });
+            }
+        }
+
+        private async Task SaveScannedDataToDatabaseAsync(DocScanResult scanResult)
+        {
+            if (scanResult == null || scanResult.Items == null || !scanResult.Items.Any())
+                return;
+
+            // கடையின் ID (Default Store ID = 1 என எடுத்துக்கொள்ளப்படுகிறது)
+            int defaultStoreId = 1;
+
+            // ரசீது தேதி
+            DateTime saleDate = DateTime.TryParse(scanResult.Date, out var parsedDate) ? parsedDate : DateTime.UtcNow;
+
+            using var transaction = await _dbContext.Database.BeginTransactionAsync();
+            try
+            {
+                foreach (var item in scanResult.Items)
+                {
+                    if (string.IsNullOrWhiteSpace(item.Description)) continue;
+
+                    string itemName = item.Description.Trim();
+
+                    // அ) பொருள் ஏற்கனவே Products Table-இல் இருக்கிறதா எனச் சரிபார்த்தல்
+                    var existingProduct = await _dbContext.Products
+                    .FirstOrDefaultAsync(p => p.Name.ToLower() == itemName.ToLower());
+
+                    int productId;
+
+                    if (existingProduct != null)
+                    {
+                        productId = existingProduct.Id;
+                    }
+                    else
+                    {
+                        // ஆ) ஸ்டோரில் பொருள் இல்லை என்றால், தானாகப் புதிய பொருளாக Products Table-இல் சேமித்தல்
+                        var newProduct = new Product
+                        {
+                            Name = itemName,
+                            Category = "Scanned Bill Item",
+                            Price = item.UnitPrice > 0 ? item.UnitPrice : item.LineTotal,
+                            Stock = 0
+                        };
+
+                        _dbContext.Products.Add(newProduct);
+                        await _dbContext.SaveChangesAsync(); // புதிய Product ID உருவாகச் சேமிக்கப்படுகிறது
+
+                        productId = newProduct.Id;
+                    }
+
+                    // இ) DailySales Table-இல் விற்பனையைப் பதிவு செய்தல்
+                    var dailySalesEntry = new DailySale
+                    {
+                        StoreID = defaultStoreId,
+                        ProductID = productId,
+                        QuantitySold = item.Quantity > 0 ? item.Quantity : 1,
+                        TotalAmount = item.LineTotal > 0 ? item.LineTotal : (item.Quantity * item.UnitPrice),
+                        SaleDate = saleDate
+                    };
+
+                    _dbContext.DailySales.Add(dailySalesEntry);
+                }
+
+                await _dbContext.SaveChangesAsync();
+                await transaction.CommitAsync();
+
+                _logger.LogInformation("Scanned receipt items saved automatically into the database.");
+            }
+            catch (Exception ex)
+            {
+                await transaction.RollbackAsync();
+                _logger.LogError(ex, "Failed to auto-save scanned items to database.");
+                throw;
             }
         }
 
@@ -188,7 +271,7 @@ namespace ShopSaleAPI.Controllers
                                                      UnitPrice = i.UnitPrice > 0 ? i.UnitPrice : i.LineTotal,
                                                      LineTotal = i.LineTotal
                 }).ToList() ?? new List<DocScanItem>(),
-                RawText = !string.IsNullOrEmpty(extractedData?.RawText) ? extractedData.RawText : "Processed via Gemini 1.5 Flash",
+                RawText = !string.IsNullOrEmpty(extractedData?.RawText) ? extractedData.RawText : "Processed via Gemini 3.6 Flash",
                 ConfidenceScore = 0.98,
                 ProcessedAt = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
             };
