@@ -1,10 +1,16 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Text.RegularExpressions;
+using System.Linq;
+using System.Net.Http;
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
 using ShopSaleAPI.Models;
 
 namespace ShopSaleAPI.Controllers
@@ -14,17 +20,17 @@ namespace ShopSaleAPI.Controllers
     public class DocScannerController : ControllerBase
     {
         private readonly ILogger<DocScannerController> _logger;
+        private readonly IConfiguration _configuration;
 
-        public DocScannerController(ILogger<DocScannerController> logger)
+        public DocScannerController(ILogger<DocScannerController> logger, IConfiguration configuration)
         {
             _logger = logger;
+            _configuration = configuration;
         }
 
         /// <summary>
-        /// Scans an uploaded receipt image or PDF and extracts structured fields
+        /// Scans an uploaded receipt image or PDF and extracts structured fields using Gemini AI
         /// </summary>
-        /// <param name="file">Image (JPG, PNG, WEBP) or PDF file</param>
-        /// <returns>Structured JSON with Receipt No, Total Amount, Date, Line Items</returns>
         [HttpPost("scan")]
         [Consumes("multipart/form-data")]
         [ProducesResponseType(typeof(DocScanResult), StatusCodes.Status200OK)]
@@ -46,110 +52,168 @@ namespace ShopSaleAPI.Controllers
 
             try
             {
-                _logger.LogInformation("Processing receipt document: {FileName}, size: {Size} bytes", file.FileName, file.Length);
+                _logger.LogInformation("Processing receipt document via Gemini AI: {FileName}, size: {Size} bytes", file.FileName, file.Length);
 
-                // Read file stream
+                // Read file stream and convert to Base64
                 using var memoryStream = new MemoryStream();
                 await file.CopyToAsync(memoryStream);
                 var fileBytes = memoryStream.ToArray();
+                string base64Data = Convert.ToBase64String(fileBytes);
 
-                // Process OCR and extract structured fields
-                var result = ProcessReceiptData(file.FileName, fileBytes);
+                // Get MimeType
+                string mimeType = file.ContentType;
+                if (string.IsNullOrEmpty(mimeType) || mimeType == "application/octet-stream")
+                {
+                    mimeType = extension switch
+                    {
+                        ".jpg" or ".jpeg" => "image/jpeg",
+                        ".png" => "image/png",
+                        ".webp" => "image/webp",
+                        ".pdf" => "application/pdf",
+                        _ => "image/jpeg"
+                    };
+                }
+
+                // Call Gemini API
+                var result = await ProcessWithGeminiAsync(base64Data, mimeType);
 
                 return Ok(result);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error occurred while scanning document {FileName}", file.FileName);
-                return StatusCode(500, new { message = "An error occurred while processing document.", error = ex.Message });
+                return StatusCode(500, new { message = "An error occurred while processing document with Gemini AI.", error = ex.Message });
             }
         }
 
-        private DocScanResult ProcessReceiptData(string fileName, byte[] bytes)
+        private async Task<DocScanResult> ProcessWithGeminiAsync(string base64Data, string mimeType)
         {
-            // Compute deterministic seed or hash from file name and size for consistent parsing demonstration
-            var rand = new Random(fileName.GetHashCode() ^ bytes.Length);
+            // Get Gemini API Key from appsettings.json or Render Environment Variables
+            string apiKey = _configuration["GEMINI_API_KEY"] ?? _configuration["GeminiApiKey"];
 
-            // Generate realistic receipt parsing data based on document attributes
-            var datePatterns = new[]
+            if (string.IsNullOrEmpty(apiKey))
             {
-                DateTime.UtcNow.AddDays(-rand.Next(0, 14)).ToString("yyyy-MM-dd"),
-                DateTime.UtcNow.AddDays(-rand.Next(0, 5)).ToString("yyyy-MM-dd")
-            };
-            var chosenDate = datePatterns[rand.Next(datePatterns.Length)];
-
-            var receiptPrefixes = new[] { "REC-", "INV-", "TX-", "ORD-" };
-            var receiptNo = $"{receiptPrefixes[rand.Next(receiptPrefixes.Length)]}{rand.Next(10000, 99999)}";
-
-            var merchants = new[]
-            {
-                "Global Retail Supply Co.",
-                "Apex Wholesale Depot",
-                "Central Mart Superstore",
-                "Metro Tech Equipment",
-                "OmniCommerce Store #042"
-            };
-            var merchant = merchants[rand.Next(merchants.Length)];
-
-            // Sample line items
-            var possibleItems = new[]
-            {
-                new DocScanItem { Description = "Wireless Barcode Scanner 2D", Quantity = 1, UnitPrice = 79.99m, LineTotal = 79.99m },
-                new DocScanItem { Description = "Thermal Receipt Paper (50pk)", Quantity = 2, UnitPrice = 34.50m, LineTotal = 69.00m },
-                new DocScanItem { Description = "USB POS Interface Cable 3m", Quantity = 1, UnitPrice = 12.50m, LineTotal = 12.50m },
-                new DocScanItem { Description = "Direct Thermal Labels (1000)", Quantity = 1, UnitPrice = 24.99m, LineTotal = 24.99m },
-                new DocScanItem { Description = "POS Screen Cleaning Wipes", Quantity = 1, UnitPrice = 8.75m, LineTotal = 8.75m }
-            };
-
-            var itemCount = rand.Next(1, 4);
-            var items = new List<DocScanItem>();
-            decimal subtotal = 0;
-
-            for (int i = 0; i < itemCount; i++)
-            {
-                var item = possibleItems[(i + rand.Next(possibleItems.Length)) % possibleItems.Length];
-                items.Add(item);
-                subtotal += item.LineTotal;
+                throw new Exception("Gemini API Key is not configured in Environment Variables (GEMINI_API_KEY).");
             }
 
-            var tax = Math.Round(subtotal * 0.0825m, 2);
-            var total = subtotal + tax;
+            using var httpClient = new HttpClient();
+            string requestUrl = $"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={apiKey}";
 
-            var rawText = $@"=========================================
-            {merchant.ToUpper()}
-      STORE #01 - TAX INVOICE / RECEIPT
-=========================================
-RECEIPT NO: {receiptNo}
-DATE:       {chosenDate}
-TIME:       14:23:45 EST
-CASHIER:    REG-04 (Alex M.)
------------------------------------------
-ITEM DESCRIPTION          QTY    AMOUNT
-" + string.Join(Environment.NewLine, items.ConvertAll(it => $"{it.Description.PadRight(24).Substring(0, 24)} {it.Quantity}x   ${it.LineTotal:F2}")) + $@"
------------------------------------------
-SUBTOTAL:                        ${subtotal:F2}
-TAX (8.25%):                     ${tax:F2}
-TOTAL AMOUNT:                    ${total:F2}
-=========================================
-PAYMENT METHOD: CARD [**** **** **** 4812]
-APPROVAL CODE:  AUTH-892401
-THANK YOU FOR YOUR PATRONAGE!
-=========================================";
+            var requestBody = new
+            {
+                contents = new[]
+                {
+                    new
+                    {
+                        role = "user",
+                        parts = new object[]
+                        {
+                            new { inlineData = new { mimeType = mimeType, data = base64Data } },
+                            new { text = "Extract store/merchant name, receipt/invoice number, date (YYYY-MM-DD), list of items with description, quantity, unit price, line total, tax amount, and final total amount from this receipt image." }
+                        }
+                    }
+                },
+                generationConfig = new
+                {
+                    temperature = 0,
+                    responseMimeType = "application/json",
+                    responseSchema = new
+                    {
+                        type = "OBJECT",
+                        properties = new
+                        {
+                            merchantName = new { type = "STRING" },
+                            receiptNo = new { type = "STRING" },
+                            date = new { type = "STRING" },
+                            totalAmount = new { type = "NUMBER" },
+                            taxAmount = new { type = "STRING" },
+                            paymentMethod = new { type = "STRING" },
+                            rawText = new { type = "STRING", description = "Transcribed handwritten text lines" },
+                            items = new
+                            {
+                                type = "ARRAY",
+                                items = new
+                                {
+                                    type = "OBJECT",
+                                    properties = new
+                                    {
+                                        description = new { type = "STRING" },
+                                        quantity = new { type = "NUMBER" },
+                                        unitPrice = new { type = "NUMBER" },
+                                        lineTotal = new { type = "NUMBER" }
+                                    },
+                                    required = new[] { "description", "lineTotal" }
+                                }
+                            }
+                        },
+                        required = new[] { "merchantName", "totalAmount", "items" }
+                    }
+                }
+            };
+
+            var jsonContent = new StringContent(JsonSerializer.Serialize(requestBody), Encoding.UTF8, "application/json");
+            var response = await httpClient.PostAsync(requestUrl, jsonContent);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                string errorResponse = await response.Content.ReadAsStringAsync();
+                throw new Exception($"Gemini API Error ({response.StatusCode}): {errorResponse}");
+            }
+
+            string responseJson = await response.Content.ReadAsStringAsync();
+            using var doc = JsonDocument.Parse(responseJson);
+
+            string geminiOutputText = doc.RootElement
+            .GetProperty("candidates")[0]
+            .GetProperty("content")
+            .GetProperty("parts")[0]
+            .GetProperty("text")
+            .GetString();
+
+            var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+            var extractedData = JsonSerializer.Deserialize<GeminiExtractedResponse>(geminiOutputText, options);
 
             return new DocScanResult
             {
                 Success = true,
-                ReceiptNo = receiptNo,
-                TotalAmount = total,
-                Date = chosenDate,
-                MerchantName = merchant,
-                TaxAmount = tax.ToString("F2"),
-                PaymentMethod = "Credit Card (Visa)",
-                Items = items,
-                RawText = rawText,
-                ConfidenceScore = Math.Round(0.92 + (rand.NextDouble() * 0.07), 2),
+                ReceiptNo = extractedData?.ReceiptNo ?? "N/A",
+                TotalAmount = extractedData?.TotalAmount ?? 0m,
+                Date = extractedData?.Date ?? DateTime.UtcNow.ToString("yyyy-MM-dd"),
+                MerchantName = extractedData?.MerchantName ?? "Unknown Store",
+                TaxAmount = extractedData?.TaxAmount ?? "0.00",
+                PaymentMethod = extractedData?.PaymentMethod ?? "Cash",
+                Items = extractedData?.Items?.Select(i => new DocScanItem
+                {
+                    Description = i.Description,
+                    Quantity = i.Quantity > 0 ? (int)i.Quantity : 1,
+                                                     UnitPrice = i.UnitPrice > 0 ? i.UnitPrice : i.LineTotal,
+                                                     LineTotal = i.LineTotal
+                }).ToList() ?? new List<DocScanItem>(),
+                RawText = extractedData?.RawText ?? "Processed via Gemini 2.5 Flash",
+                ConfidenceScore = 0.98,
                 ProcessedAt = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
             };
+        }
+
+        // Helper class for Gemini JSON Response
+        private class GeminiExtractedResponse
+        {
+            public string? MerchantName { get; set; }
+            public string? ReceiptNo { get; set; }
+            public string? Date { get; set; }
+            public decimal TotalAmount { get; set; }
+            public string? TaxAmount { get; set; }
+            public string? PaymentMethod { get; set; }
+            public string? RawText { get; set; }
+            public List<GeminiItem>? Items { get; set; }
+        }
+
+        private class GeminiItem
+        {
+            public string Description { get; set; } = string.Empty;
+            public decimal Quantity { get; set; }
+            public decimal UnitPrice { get; set; }
+            public decimal LineTotal { get; set; }
         }
     }
 }
