@@ -1,0 +1,22 @@
+node_modules/
+dist/
+.env
+ShopSale.db
+ShopSaleAPI/bin/
+ShopSaleAPI/obj/
+.vscode/
+.idea/
+
+# Android Build Exclusions
+android/.gradle/
+android/build/
+android/app/build/
+android/captures/
+android/.idea/
+android/*.iml
+android/app/*.iml
+android/local.properties
+bin/
+obj/
+appsettings.json
+appsettings.Development.json
