@@ -1,5 +1,5 @@
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.Data.Sqlite;
+using Npgsql;
 using ShopSaleAPI.Data;
 
 namespace ShopSaleAPI.Controllers
@@ -23,15 +23,11 @@ namespace ShopSaleAPI.Controllers
         {
             try
             {
-                var dbPath = Path.Combine(Directory.GetCurrentDirectory(), "ShopSale.db");
-                var fileInfo = new FileInfo(dbPath);
-
                 return Ok(new
                 {
-                    fileName = "ShopSale.db",
-                    fileSize = fileInfo.Exists ? fileInfo.Length : 0,
+                    databaseType = "Supabase PostgreSQL",
                     activeConnection = true,
-                    provider = "Microsoft.EntityFrameworkCore.Sqlite"
+                    provider = "Npgsql.EntityFrameworkCore.PostgreSQL"
                 });
             }
             catch (Exception ex)
@@ -46,8 +42,8 @@ namespace ShopSaleAPI.Controllers
         {
             try
             {
-                var connString = _configuration.GetConnectionString("DefaultConnection") ?? "Data Source=ShopSale.db";
-                using var connection = new SqliteConnection(connString);
+                var connString = _configuration.GetConnectionString("DefaultConnection");
+                using var connection = new NpgsqlConnection(connString);
                 await connection.OpenAsync();
 
                 var validTables = new List<string> { "Products", "Stores", "DailySales", "Users" };
@@ -60,7 +56,6 @@ namespace ShopSaleAPI.Controllers
 
                 var command = connection.CreateCommand();
 
-                // 💡 திருத்தப்பட்ட SQL Query (Column பெயர்கள் சரிசெய்யப்பட்டுள்ளன)
                 if (targetTable.Equals("DailySales", StringComparison.OrdinalIgnoreCase))
                 {
                     command.CommandText = @"
@@ -80,7 +75,8 @@ namespace ShopSaleAPI.Controllers
                 }
                 else
                 {
-                    command.CommandText = $"SELECT * FROM {targetTable} LIMIT @limit OFFSET @offset";
+                    // PostgreSQL-க்கு ஏற்றவாறு டேபிள் பெயரைப் பாதுகாப்பாகக் குறிப்பிடுதல்
+                    command.CommandText = $"SELECT * FROM \"{targetTable}\" LIMIT @limit OFFSET @offset";
                 }
 
                 command.Parameters.AddWithValue("@limit", limit);
