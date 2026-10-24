@@ -76,13 +76,14 @@ builder.Services.AddAuthentication(options =>
 
 builder.Services.AddAuthorization();
 
-// 5. Configure EF Core with Supabase PostgreSQL
+// 5. Configure EF Core with Supabase PostgreSQL (Connection Pooler)
 var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
 
 builder.Services.AddDbContext<ShopSaleDbContext>(options =>
 {
     options.UseNpgsql(connectionString);
 });
+
 // 6. Configure Swagger
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(c =>
@@ -168,7 +169,7 @@ using (var scope = app.Services.CreateScope())
     }
     catch (Exception ex)
     {
-        app.Logger.LogError(ex, "Error initializing SQLite DB or seeding Admin.");
+        app.Logger.LogError(ex, "Error initializing PostgreSQL DB or seeding Admin.");
     }
 }
 
